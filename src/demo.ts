@@ -1,0 +1,201 @@
+import type { DB } from './db';
+import { createProject, importVersion, addAnnotation } from './service';
+import { addReviewer, batchAssign, claimFragment, setFragmentCompleted } from './assignment';
+import { createTermRule } from './termService';
+
+const V1 = `第一条 为规范平台数据处理活动，保障数据安全，根据《中华人民共和国数据安全法》等法律法规，制定本办法。
+
+第二条 本办法适用于在境内开展的平台数据收集、存储、使用、加工、传输、提供、公开等活动。
+
+第三条 平台运营者应当建立数据安全管理制度，明确数据安全负责人，落实数据安全保护责任。
+
+第四条 平台收集个人信息，应当遵循合法、正当、必要的原则，公开收集规则，明示收集目的、方式和范围。
+
+第五条 平台应当对用户数据实行分类分级管理，采取相应的技术保护措施，防止数据泄露、篡改、丢失。
+
+第六条 平台发生数据安全事件，应当在四十八小时内向主管部门报告。
+
+第七条 违反本办法规定的，由主管部门责令改正，给予警告。`;
+
+const V2 = `第一条 为规范平台数据处理活动，保障数据安全，根据《中华人民共和国数据安全法》等法律法规，制定本办法。
+
+第二条 本办法适用于在境内开展的平台数据收集、存储、使用、加工、传输、提供、公开等活动。
+
+第三条 平台运营者应当建立数据安全管理制度，明确数据安全负责人，落实数据安全保护责任。
+
+第四条 平台收集个人信息，应当遵循合法、正当、必要的原则，公开收集规则，明示收集目的、方式和范围，不得过度收集与提供服务无关的个人信息。
+
+第五条 平台应当对用户数据实行分类分级管理，采取相应的技术保护措施和访问控制策略，防止数据泄露、篡改、丢失。
+
+第六条 平台发生数据安全事件，应当在二十四小时内向主管部门报告，并同步采取补救措施。
+
+第七条 违反本办法规定的，由主管部门责令改正，给予警告，并处一万元以上十万元以下罚款。
+
+第八条 平台应当每年开展数据安全评估，并将评估结果报送主管部门。`;
+
+const V3 = `第一条 为规范平台数据处理活动，保障数据安全，根据《中华人民共和国数据安全法》等法律法规，制定本办法。
+
+第二条 本办法适用于在境内开展的平台数据收集、存储、使用、加工、传输、提供、公开等活动。
+
+第三条 平台运营者应当建立数据安全管理制度，明确数据安全负责人，落实数据安全保护责任，定期组织数据安全培训。
+
+第四条 平台收集个人信息，应当遵循合法、正当、必要的原则，公开收集规则，明示收集的目的、方式和范围，不得过度收集与提供服务无关的个人信息。
+
+第五条 平台应当对用户数据实行分类分级管理，采取相应的技术保护措施和访问控制策略，防止数据泄露、篡改、丢失。
+
+第六条 平台发生数据安全事件，应当立即采取补救措施，并在二十四小时内向主管部门报告。
+
+第八条 平台应当每年开展数据安全评估，并将评估结果报送主管部门。`;
+
+/**
+ * 分叉版本 v2.1：以 v2（送审稿）为基线，演示 versions.baseline_id 形成的分支图——
+ * 条款沿革从任一段落出发可同时看到 v3 主线与 v2.1 分支的不同去向。
+ * 相对 v2：第三条未变；第六条罚时限仍为二十四小时（未变）；新增「数据出境」专条；
+ * 第七条罚款段被新条新增替代；第八条年度评估在本分支被删除。
+ */
+const V2_BRANCH = `第一条 为规范平台数据处理活动，保障数据安全，根据《中华人民共和国数据安全法》等法律法规，制定本办法。
+
+第二条 本办法适用于在境内开展的平台数据收集、存储、使用、加工、传输、提供、公开等活动。
+
+第三条 平台运营者应当建立数据安全管理制度，明确数据安全负责人，落实数据安全保护责任。
+
+第四条 平台收集个人信息，应当遵循合法、正当、必要的原则，公开收集规则，明示收集目的、方式和范围，不得过度收集与提供服务无关的个人信息。
+
+第五条 平台应当对用户数据实行分类分级管理，采取相应的技术保护措施，防止数据泄露、篡改、丢失。
+
+第六条 平台发生数据安全事件，应当在二十四小时内向主管部门报告，并同步采取补救措施。
+
+第七条 平台开展数据出境活动，应当通过国家网信部门组织的安全评估，并与境外接收方订立标准合同后方可向境外提供数据。`;
+
+export interface DemoResult {
+  projectId: number;
+  projectName: string;
+  comparisons: number[];
+  /** 主线第二轮比对 id（v2→v3），演示入口默认跳转到这里 */
+  mainComparisonId: number;
+  migration: unknown;
+}
+
+/**
+ * 载入示例：导入三个版本，并在第一轮比对上预置若干批注，
+ * 使第二轮比对可以直接演示批注迁移（成功迁移 / 条款被删除 / 待复核）。
+ */
+export function seedDemo(db: DB): DemoResult {
+  const projectName = '示例：平台数据安全管理办法';
+  const projectId = createProject(db, projectName);
+
+  importVersion(db, projectId, 'v1.0 征求意见稿', V1);
+  const r2 = importVersion(db, projectId, 'v2.0 送审稿', V2);
+  if (r2.status !== 'ok' || r2.comparisonId == null) {
+    throw new Error('示例数据异常：v2 比对未生成');
+  }
+
+  const fragments = db
+    .prepare('SELECT id, new_text FROM fragments WHERE comparison_id = ?')
+    .all(r2.comparisonId) as Array<{ id: number; new_text: string | null }>;
+  const find = (kw: string): number => {
+    const f = fragments.find((fr) => (fr.new_text ?? '').includes(kw));
+    if (!f) throw new Error(`示例数据异常：找不到包含「${kw}」的片段`);
+    return f.id;
+  };
+
+  const note = (fragId: number, author: string, content: string): number => {
+    const r = addAnnotation(db, fragId, author, content);
+    if (r.status !== 'ok') throw new Error(`示例数据异常：批注创建失败（${r.status}）`);
+    return r.id;
+  };
+
+  note(find('不得过度收集'), '王法务', '「不得过度收集」的判定标准需要明确，建议补充实施细则或指引。');
+  note(find('访问控制策略'), '李合规', '访问控制策略的基线需要安全团队给出，落地周期约两个月。');
+  note(find('二十四小时'), '李合规', '报告时限从 48 小时压缩到 24 小时，应急预案和值班流程需要同步修订。');
+  note(find('一万元以上十万元以下'), '张审计', '罚款额度是否与上位法冲突？需要法务出具意见。');
+  const resolvedId = note(find('每年开展数据安全评估'), '王法务', '年度评估要求已与团队确认，无异议。');
+  db.prepare(`UPDATE annotations SET status = 'resolved' WHERE id = ?`).run(resolvedId);
+
+  const r3 = importVersion(db, projectId, 'v3.0 正式发布稿', V3);
+  if (r3.status !== 'ok' || r3.comparisonId == null) {
+    throw new Error('示例数据异常：v3 比对未生成');
+  }
+
+  // 为本轮比对预置审阅分派：登记名单、分派片段，并演示认领 / 完成 / 待认领三种状态
+  seedAssignments(db, r3.comparisonId);
+
+  // 分叉版本：以 v2 送审稿为基线（而非最新的 v3），形成版本分支图，供「条款沿革」演示
+  const rBranch = importVersion(db, projectId, 'v2.1 出境专章（基于送审稿分叉）', V2_BRANCH, r2.versionId);
+  if (rBranch.status !== 'ok' || rBranch.comparisonId == null) {
+    throw new Error('示例数据异常：分叉版本比对未生成');
+  }
+
+  // 术语一致性审查：预置术语表（v1 含禁用变体，v2/v3 已改正），进入项目页「术语审查」即可扫描
+  seedTermRules(db, projectId);
+
+  return {
+    projectId,
+    projectName,
+    comparisons: [r2.comparisonId, r3.comparisonId, rBranch.comparisonId],
+    mainComparisonId: r3.comparisonId,
+    migration: r3.migration,
+  };
+}
+
+/** 示例术语规则：覆盖规范术语、允许写法与禁用变体（v1 文本中含违规写法） */
+function seedTermRules(db: DB, projectId: number): void {
+  const rules: Array<{ term: string; allowed: string[]; forbidden: string[]; note: string }> = [
+    {
+      term: '二十四小时',
+      allowed: ['24小时'],
+      forbidden: ['四十八小时', '48小时', '48 小时'],
+      note: '数据安全事件报告时限统一为二十四小时；旧稿的四十八小时表述需全部改正。',
+    },
+    {
+      term: '个人信息',
+      allowed: [],
+      forbidden: ['个资', '个人资料'],
+      note: '正式文本统一使用「个人信息」。',
+    },
+    {
+      term: '访问控制策略',
+      allowed: ['访问控制措施'],
+      forbidden: ['权限管控'],
+      note: '与安全团队基线术语保持一致。',
+    },
+  ];
+  for (const r of rules) {
+    const res = createTermRule(db, projectId, r.term, r.allowed, r.forbidden, r.note);
+    if (res.status !== 'ok') throw new Error(`示例数据异常：术语规则创建失败（${res.status}）`);
+  }
+}
+
+/** 示例分派：王法务 / 李合规 / 张审计三人按片段分派，部分已认领或完成 */
+function seedAssignments(db: DB, comparisonId: number): void {
+  const wang = addReviewer(db, comparisonId, '王法务');
+  const li = addReviewer(db, comparisonId, '李合规');
+  const zhang = addReviewer(db, comparisonId, '张审计');
+  if (wang.status !== 'ok' || li.status !== 'ok' || zhang.status !== 'ok') {
+    throw new Error('示例数据异常：审阅人名单登记失败');
+  }
+  const frags = db
+    .prepare('SELECT id, ord FROM fragments WHERE comparison_id = ? ORDER BY ord')
+    .all(comparisonId) as Array<{ id: number; ord: number }>;
+  if (frags.length === 0) return;
+
+  // 负责人把片段依次分派给三位审阅人
+  const roster = [wang.id, li.id, zhang.id] as const;
+  const items = frags.map((f, i) => ({ fragment_id: f.id, reviewer_id: roster[i % roster.length] }));
+  const assigned = batchAssign(db, comparisonId, '项目负责人', items);
+  if (assigned.status !== 'ok') throw new Error(`示例数据异常：分派失败（${assigned.status}）`);
+
+  // 第一个片段：王法务认领并完成
+  const first = frags[0];
+  const claim = claimFragment(db, first.id, wang.id, 1);
+  if (claim.status !== 'ok') throw new Error(`示例数据异常：认领失败（${claim.status}）`);
+  const done = setFragmentCompleted(db, first.id, wang.id, claim.assignment.assign_version, true);
+  if (done.status !== 'ok') throw new Error(`示例数据异常：完成失败（${done.status}）`);
+
+  // 第二个片段：李合规已认领、进行中
+  if (frags[1]) {
+    const c = claimFragment(db, frags[1].id, li.id, 1);
+    if (c.status !== 'ok') throw new Error(`示例数据异常：认领失败（${c.status}）`);
+  }
+  // 其余片段保持「已分派待处理」或由张审计持有，供前端演示筛选与转交
+}
