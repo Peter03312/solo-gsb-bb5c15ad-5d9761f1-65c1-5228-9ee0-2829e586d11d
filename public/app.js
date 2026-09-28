@@ -119,6 +119,7 @@ async function renderProject(id) {
         <h2>${esc(project.name)}</h2>
         <div class="head-side">
           <a class="btn" href="#/projects/${project.id}/terminology">🔎 术语一致性审查</a>
+          <a class="btn" href="#/projects/${project.id}/cross-references">🔗 条款交叉引用校验</a>
           <button class="btn danger" data-action="delete-project" data-id="${project.id}">删除项目</button>
         </div>
       </div>
@@ -440,6 +441,7 @@ function rel_isFragment(rel) {
 /* ================= 视图：术语一致性审查 ================= */
 
 const TERM_KIND_LABEL = { term: '规范术语', allowed: '允许写法', forbidden: '禁用变体' };
+const XREF_STATUS_LABEL = { unique: '唯一匹配', ambiguous: '歧义', broken: '失效' };
 
 /**
  * 术语审查模块状态（按项目隔离）：
@@ -855,6 +857,336 @@ function highlightHits(text, hits) {
   }
   return html;
 }
+
+/* ================= 视图：条款交叉引用校验 ================= */
+
+/**
+ * 条款交叉引用校验模块状态（按项目隔离，只使用所选的一个版本）：
+ *  - overview：项目内版本清单（进入页面时拉取）
+ *  - selectedVersionId：选定版本；report：最近一次扫描结果
+ *  - paragraphs：所选版本按导入规则切分的段落（定位来源 / 目标段落时懒加载）
+ *  - statusFilter：all / unique / ambiguous / broken
+ */
+const xrefScan = {
+  projectId: null,
+  overview: null,
+  selectedVersionId: null,
+  report: null,
+  scanning: false,
+  error: null,
+  statusFilter: 'all',
+  paragraphs: null,
+
+  async activate(projectId) {
+    if (this.projectId !== projectId) {
+      this.projectId = projectId;
+      this.overview = null;
+      this.selectedVersionId = null;
+      this.report = null;
+      this.error = null;
+      this.statusFilter = 'all';
+      this.paragraphs = null;
+    }
+    await this.fetchOverview();
+    if (this.selectedVersionId == null && this.overview.versions.length > 0) {
+      this.selectedVersionId = this.overview.versions[0].id;
+    }
+  },
+
+  async fetchOverview() {
+    this.overview = await api('GET', `/api/projects/${this.projectId}/cross-references`);
+  },
+
+  selectVersion(versionId) {
+    if (versionId === this.selectedVersionId) return;
+    this.selectedVersionId = versionId;
+    this.report = null;
+    this.error = null;
+    this.statusFilter = 'all';
+    this.paragraphs = null;
+    this.draw();
+  },
+
+  async runScan() {
+    if (this.selectedVersionId == null) {
+      toast('请先选择一个版本', true);
+      return;
+    }
+    this.scanning = true;
+    this.error = null;
+    this.draw();
+    try {
+      this.report = await api(
+        'GET',
+        `/api/projects/${this.projectId}/cross-references/scan?version_id=${this.selectedVersionId}`
+      );
+      this.statusFilter = 'all';
+      this.paragraphs = null;
+      // 定位依赖该版本的切分段落，扫描后自动懒加载（与扫描同一切分规则）
+      await this.ensureParagraphs();
+    } catch (err) {
+      this.error = err.message;
+      this.report = null;
+    } finally {
+      this.scanning = false;
+      this.draw();
+    }
+  },
+
+  async ensureParagraphs() {
+    if (this.paragraphs || this.selectedVersionId == null) return this.paragraphs;
+    const data = await api(
+      'GET',
+      `/api/projects/${this.projectId}/versions/${this.selectedVersionId}/paragraphs`
+    );
+    this.paragraphs = data.paragraphs;
+    return this.paragraphs;
+  },
+
+  /** 当前筛选状态下的引用列表（同段多处引用分别成行） */
+  filteredReferences() {
+    if (!this.report) return [];
+    if (this.statusFilter === 'all') return this.report.references;
+    return this.report.references.filter((r) => r.status === this.statusFilter);
+  },
+
+  /** 导出链接：服务端按相同隔离与 404 语义对所选版本重新扫描 */
+  exportUrl(format) {
+    return `/api/projects/${this.projectId}/cross-references/export?version_id=${this.selectedVersionId}&format=${format}`;
+  },
+
+  /** 定位：展开版本正文、滚动到目标段落并高亮；focusRef 时同时高亮段内引用原文 */
+  async locate(paragraph, focusRef = null) {
+    await this.ensureParagraphs();
+    this.draw();
+    const anchor = document.getElementById(`xref-para-${paragraph}`);
+    if (anchor) {
+      anchor.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      anchor.classList.remove('flash');
+      void anchor.offsetWidth; // 重置动画，连续定位不同段落时再次闪烁
+      anchor.classList.add('flash');
+      setTimeout(() => anchor.classList.remove('flash'), 1800);
+    }
+    if (focusRef) {
+      setTimeout(() => {
+        const mark = document.getElementById(`xref-mark-${focusRef.paragraph_ord}-${focusRef.occurrence}`);
+        if (mark) {
+          mark.classList.add('mark-flash');
+          setTimeout(() => mark.classList.remove('mark-flash'), 2000);
+        }
+      }, 250);
+    }
+  },
+
+  draw() {
+    const mount = document.getElementById('xref-mount');
+    if (mount) mount.innerHTML = this.panelHtml();
+  },
+
+  panelHtml() {
+    const ov = this.overview;
+    if (!ov) return '<div class="xref-panel"><p class="dim">版本列表加载中…</p></div>';
+    return `
+    <div class="xref-panel">
+      <div class="res-head">
+        <h3>🔗 条款交叉引用校验 <span class="dim">对段落开头的「第十二条 / 第12条」建立同一编号索引（一至九十九），扫描正文中的同类引用</span></h3>
+      </div>
+      ${this.scanFormHtml(ov)}
+      ${this.error ? `<p class="error">${esc(this.error)}</p>` : ''}
+      ${this.report ? this.reportHtml() : ''}
+    </div>`;
+  },
+
+  scanFormHtml(ov) {
+    const options = ov.versions.length === 0
+      ? '<option value="">该项目还没有版本</option>'
+      : ov.versions
+          .map(
+            (v) =>
+              `<option value="${v.id}" ${this.selectedVersionId === v.id ? 'selected' : ''}>v${v.seq} ${esc(v.label)}（${v.paragraph_count} 段）</option>`
+          )
+          .join('');
+    return `
+    <div class="term-scan-form">
+      <h4>选择待校验的版本（扫描与定位只使用该版本）</h4>
+      <div class="term-form-actions">
+        <label>版本
+          <select id="xref-version-select" ${ov.versions.length === 0 ? 'disabled' : ''}>${options}</select>
+        </label>
+        <button class="btn primary" data-action="xref-scan" ${this.scanning || ov.versions.length === 0 ? 'disabled' : ''}>
+          ${this.scanning ? '扫描中…' : '▶ 执行交叉引用校验'}
+        </button>
+      </div>
+      <p class="hint">段首条款标题（如「第十二条」「第12条」）建立编号索引但<b>自身不算引用</b>；
+        中文数字与阿拉伯数字按同一编号匹配；同一段落中的多处引用分别列出；
+        引用找不到编号标为<b>失效</b>，编号对应多段标为<b>歧义</b>，唯一匹配给出目标段落。</p>
+    </div>`;
+  },
+
+  reportHtml() {
+    const r = this.report;
+    const s = r.summary;
+    const refs = this.filteredReferences();
+    const rows = refs.map((ref) => {
+      const statusBadge =
+        ref.status === 'unique'
+          ? '<span class="badge xref-unique">✓ 唯一匹配</span>'
+          : ref.status === 'ambiguous'
+            ? '<span class="badge xref-ambiguous">⚠ 歧义</span>'
+            : '<span class="badge xref-broken">✕ 失效</span>';
+      const targetCell =
+        ref.status === 'unique'
+          ? `<span class="xref-target-ok">¶${ref.target_paragraph_ord}
+               <button class="btn small" data-action="xref-locate-target" data-paragraph="${ref.target_paragraph_ord}">🎯 定位目标段落</button>
+             </span>
+             <div class="dim xref-target-text">${esc(truncate(ref.target_text ?? '', 80))}</div>`
+          : ref.status === 'ambiguous'
+            ? `<b class="warn">编号「${ref.text}」对应 ${ref.targets.length} 段：</b>
+               <div class="xref-targets">${ref.targets
+                 .map(
+                   (p) =>
+                     `<button class="btn small" data-action="xref-locate-target" data-paragraph="${p}">¶${p}</button>`
+                 )
+                 .join(' ')}</div>`
+            : '<span class="dim">该编号在本版本中没有对应段落</span>';
+      return `
+        <tr class="xref-row st-${ref.status}">
+          <td class="nowrap">¶${ref.paragraph_ord} <span class="dim">#${ref.occurrence}</span></td>
+          <td>${ref.number}<div class="dim">${ref.number_style === 'cn' ? '中文数字' : '阿拉伯数字'}</div></td>
+          <td><code class="term-snippet">${esc(ref.text)}</code></td>
+          <td>${statusBadge}</td>
+          <td>${targetCell}</td>
+          <td><div class="dim term-context">${esc(ref.context)}</div></td>
+          <td class="nowrap">
+            <button class="btn small" data-action="xref-locate-source"
+              data-paragraph="${ref.paragraph_ord}" data-occurrence="${ref.occurrence}">📍 定位来源</button>
+          </td>
+        </tr>`;
+    }).join('');
+    return `
+    <div class="term-report">
+      <div class="term-report-head">
+        <h4>校验结果
+          <span class="dim">v${r.version.seq} ${esc(r.version.label)} · 扫描于 ${esc(r.scanned_at)}</span>
+        </h4>
+        <div class="export-bar">
+          导出：
+          <a class="btn small" href="${this.exportUrl('json')}" target="_blank">JSON</a>
+          <a class="btn small" href="${this.exportUrl('csv')}">CSV</a>
+        </div>
+      </div>
+      <div class="stats">
+        <span class="chip">段落 ${s.paragraphs}</span>
+        <span class="chip">条款标题 ${s.headings}</span>
+        <span class="chip xref-unique">唯一匹配 ${s.unique}</span>
+        <span class="chip xref-ambiguous${s.ambiguous > 0 ? ' hot' : ''}">歧义 ${s.ambiguous}</span>
+        <span class="chip xref-broken${s.broken > 0 ? ' hot' : ''}">失效 ${s.broken}</span>
+        <span class="chip">引用合计 ${s.total}</span>
+      </div>
+      <div class="filter-bar">
+        <label>校验状态
+          <select id="xref-filter-status">
+            <option value="all" ${this.statusFilter === 'all' ? 'selected' : ''}>全部</option>
+            <option value="unique" ${this.statusFilter === 'unique' ? 'selected' : ''}>仅唯一匹配</option>
+            <option value="ambiguous" ${this.statusFilter === 'ambiguous' ? 'selected' : ''}>仅歧义</option>
+            <option value="broken" ${this.statusFilter === 'broken' ? 'selected' : ''}>仅失效</option>
+          </select>
+        </label>
+        <span class="dim">显示 ${refs.length} / ${s.total} 处引用</span>
+      </div>
+      ${refs.length === 0
+        ? '<p class="empty">没有符合筛选条件的引用。</p>'
+        : `<table class="cand-table xref-table">
+            <thead><tr><th>来源段落</th><th>编号</th><th>引用原文</th><th>状态</th><th>目标</th><th>上下文</th><th>定位</th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>`}
+      ${this.paragraphsBoxHtml()}
+    </div>`;
+  },
+
+  /** 版本正文：标题段与引用处高亮，供「定位来源 / 定位目标段落」滚动 */
+  paragraphsBoxHtml() {
+    const paras = this.paragraphs;
+    if (!paras) return '<div id="xref-paras-box" class="term-version-paras"><p class="dim">段落加载中…</p></div>';
+    const r = this.report;
+    const refsByPara = new Map();
+    for (const ref of r.references) {
+      if (!refsByPara.has(ref.paragraph_ord)) refsByPara.set(ref.paragraph_ord, []);
+      refsByPara.get(ref.paragraph_ord).push(ref);
+    }
+    const headingOrds = new Set(r.headings.map((h) => h.paragraph_ord));
+    return `
+    <div id="xref-paras-box" class="term-version-paras">
+      <h4>v${r.version.seq} ${esc(r.version.label)} · 版本正文（共 ${paras.length} 段；标题蓝框、引用按状态高亮）</h4>
+      ${paras
+        .map((p) => {
+          const refs = refsByPara.get(p.ord) ?? [];
+          return `
+          <div id="xref-para-${p.ord}" class="term-para${refs.length ? ' has-hit' : ''}${headingOrds.has(p.ord) ? ' xref-heading-para' : ''}">
+            <span class="term-para-ord">¶${p.ord}</span>
+            <pre class="term-para-text">${this.highlightParagraph(p.text, refs, headingOrds.has(p.ord))}</pre>
+            ${refs.length
+              ? `<div class="term-para-hits">${refs
+                  .map(
+                    (ref) =>
+                      `<span class="term-chip xref-${ref.status}">${XREF_STATUS_LABEL[ref.status]}：${esc(ref.text)}${
+                        ref.target_paragraph_ord != null ? ` → ¶${ref.target_paragraph_ord}` : ''
+                      }</span>`
+                  )
+                  .join(' ')}</div>`
+              : ''}
+          </div>`;
+        })
+        .join('')}
+    </div>`;
+  },
+
+  /**
+   * 在段落原文中高亮：段首条款标题（蓝框）与各引用（按状态着色）。
+   * 与术语模块相同，先按码点落位再逐码点拼接，避免非 BMP 字符截断；
+   * 标题与引用区间不重叠（标题自身不算引用）。
+   */
+  highlightParagraph(text, refs, hasHeading) {
+    const cps = Array.from(text);
+    const marks = new Array(cps.length).fill(null);
+    const spans = [];
+    if (hasHeading) {
+      const m = /^\s*第(?:[一二三四五六七八九十]+|\d{1,2})(?!\d)条/.exec(text);
+      if (m) {
+        const startCp = Array.from(m[0].match(/^\s*/)[0]).length;
+        spans.push({ start: startCp, end: Array.from(m[0]).length, cls: 'xref-heading-mark' });
+      }
+    }
+    refs.forEach((ref) => {
+      spans.push({
+        start: ref.start,
+        end: ref.end,
+        cls: `xref-mark xref-${ref.status}`,
+        id: `xref-mark-${ref.paragraph_ord}-${ref.occurrence}`,
+      });
+    });
+    spans.sort((a, b) => b.end - b.start - (a.end - a.start) || a.start - b.start);
+    for (const sp of spans) {
+      for (let i = sp.start; i < sp.end; i++) {
+        if (marks[i] == null) marks[i] = sp;
+      }
+    }
+    let html = '';
+    let cur = null;
+    for (let i = 0; i <= cps.length; i++) {
+      const owner = i < cps.length ? marks[i] : null;
+      if (owner !== cur) {
+        if (cur) html += '</mark>';
+        if (owner) {
+          html += `<mark class="${owner.cls}"${owner.id ? ` id="${owner.id}"` : ''}>`;
+        }
+        cur = owner;
+      }
+      if (i < cps.length) html += esc(cps[i]);
+    }
+    return html;
+  },
+};
 
 /* ================= 视图：比对详情 ================= */
 
@@ -1889,6 +2221,15 @@ document.addEventListener('click', async (e) => {
       const box = document.getElementById(`term-vparas-${versionId}`);
       if (box && box.hidden) await termScan.ensureParasLoaded(versionId);
       termScan.toggleParas(versionId);
+    } else if (action === 'xref-scan') {
+      await xrefScan.runScan();
+    } else if (action === 'xref-locate-source') {
+      await xrefScan.locate(Number(btn.dataset.paragraph), {
+        paragraph_ord: Number(btn.dataset.paragraph),
+        occurrence: Number(btn.dataset.occurrence),
+      });
+    } else if (action === 'xref-locate-target') {
+      await xrefScan.locate(Number(btn.dataset.paragraph));
     } else if (action === 'seal') {
       const input = document.getElementById('seal-by');
       const sealedBy = input.value.trim();
@@ -1989,6 +2330,11 @@ document.addEventListener('change', async (e) => {
     } else if (t.id === 'term-filter-rule') {
       termScan.ruleFilter = t.value;
       termScan.draw();
+    } else if (t.id === 'xref-version-select') {
+      xrefScan.selectVersion(Number(t.value));
+    } else if (t.id === 'xref-filter-status') {
+      xrefScan.statusFilter = t.value;
+      xrefScan.draw();
     } else if (t.id === 'current-reviewer') {
       if (!t.value) {
         currentReviewer.clear(cmp.id);
@@ -2073,13 +2419,38 @@ async function renderTerminology(projectId) {
   termScan.draw();
 }
 
+async function renderCrossReferences(projectId) {
+  try {
+    await xrefScan.activate(projectId);
+  } catch (err) {
+    app.innerHTML = `<section class="panel"><p class="error">${esc(err.message)}</p>
+      <p><a href="#/">返回首页</a></p></section>`;
+    return;
+  }
+  const project = xrefScan.overview.project;
+  app.innerHTML = `
+    <nav class="crumbs">
+      <a href="#/">全部项目</a> / <a href="#/projects/${project.id}">${esc(project.name)}</a> / 条款交叉引用校验
+    </nav>
+    <section class="panel">
+      <div class="panel-head">
+        <h2>🔗 条款交叉引用校验 · ${esc(project.name)}</h2>
+        <a class="btn" href="#/projects/${project.id}">← 返回项目</a>
+      </div>
+      <div id="xref-mount"></div>
+    </section>`;
+  xrefScan.draw();
+}
+
 async function route() {
   const hash = location.hash || '#/';
   const mTerminology = hash.match(/^#\/projects\/(\d+)\/terminology$/);
+  const mXref = hash.match(/^#\/projects\/(\d+)\/cross-references$/);
   const mProject = hash.match(/^#\/projects\/(\d+)$/);
   const mCompare = hash.match(/^#\/comparisons\/(\d+)$/);
   try {
     if (mTerminology) await renderTerminology(Number(mTerminology[1]));
+    else if (mXref) await renderCrossReferences(Number(mXref[1]));
     else if (mCompare) await renderComparison(Number(mCompare[1]));
     else if (mProject) await renderProject(Number(mProject[1]));
     else await renderProjects();

@@ -835,3 +835,25 @@ textarea { width: 100%; resize: vertical; font-family: inherit; }
 .term-mark.forbidden { background: #fecaca; font-weight: 600; }
 
 .head-side { display: flex; gap: 8px; align-items: center; }
+
+/* ================= 条款交叉引用校验 ================= */
+.xref-panel { display: flex; flex-direction: column; gap: 14px; }
+.xref-table td { vertical-align: top; font-size: 13px; }
+.xref-row.st-broken { background: #fff7f7; }
+.xref-row.st-ambiguous { background: #fffaf0; }
+.xref-target-text { max-width: 320px; white-space: pre-wrap; margin-top: 2px; }
+.xref-targets { margin-top: 4px; display: flex; flex-wrap: wrap; gap: 4px; }
+
+.badge.xref-unique, .chip.xref-unique { color: var(--added-fg); background: var(--added-bg); border-color: var(--added-border); }
+.badge.xref-ambiguous, .chip.xref-ambiguous { color: #b45309; background: #fffbeb; border-color: #fcd34d; }
+.badge.xref-broken, .chip.xref-broken { color: var(--removed-fg); background: var(--removed-bg); border-color: var(--removed-border); }
+.term-chip.xref-unique { color: var(--added-fg); background: var(--added-bg); border-color: var(--added-border); }
+.term-chip.xref-ambiguous { color: #b45309; background: #fffbeb; border-color: #fcd34d; }
+.term-chip.xref-broken { color: var(--removed-fg); background: var(--removed-bg); border-color: var(--removed-border); font-weight: 600; }
+
+.term-para.xref-heading-para { border-left-color: #93c5fd; }
+.term-mark.xref-heading-mark { background: #dbeafe; outline: 1px solid #93c5fd; }
+.term-mark.xref-unique { background: #bbf7d0; }
+.term-mark.xref-ambiguous { background: #fde68a; font-weight: 600; }
+.term-mark.xref-broken { background: #fecaca; font-weight: 600; }
+.term-mark.mark-flash { outline: 2px solid #f59e0b; outline-offset: 1px; }

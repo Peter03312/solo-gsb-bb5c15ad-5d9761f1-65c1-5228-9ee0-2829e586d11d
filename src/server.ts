@@ -39,6 +39,8 @@ import {
   scanVersions,
 } from './termService';
 import { termScanToCsv } from './termExport';
+import { scanVersionXref, getXrefOverview } from './xrefService';
+import { xrefReportToCsv } from './xrefExport';
 
 const PORT = Number(process.env.PORT ?? 3000);
 const DB_PATH = process.env.DB_PATH ?? path.join(process.cwd(), 'data', 'review.db');
@@ -708,6 +710,67 @@ app.get('/api/projects/:id/terminology/export', (req, res) => {
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `${disposition}.csv`);
     return res.send(termScanToCsv(report));
+  }
+  if (format !== 'json') return badRequest(res, 'format 需为 json / csv');
+  res.setHeader('Content-Disposition', `${disposition}.json`);
+  return res.json(report);
+});
+
+// ---------- 条款交叉引用校验 ----------
+/** 校验页初始化数据：项目信息与项目内版本清单（含段落数） */
+app.get('/api/projects/:id/cross-references', (req, res) => {
+  const data = getXrefOverview(db, Number(req.params.id));
+  if (!data) return notFound(res, '项目不存在');
+  res.json(data);
+});
+
+/**
+ * 对项目内单个版本执行条款交叉引用校验：
+ * 段首「第十二条 / 第12条」建立编号索引，扫描正文中的同类引用；
+ * 版本未知或不属于该项目（含其他项目的版本 id）→ 404。
+ */
+app.get('/api/projects/:id/cross-references/scan', (req, res) => {
+  const projectId = Number(req.params.id);
+  const versionId = Number(req.query.version_id);
+  if (!Number.isInteger(versionId) || versionId <= 0) {
+    return badRequest(res, 'version_id 必须为正整数');
+  }
+  const result = scanVersionXref(db, projectId, versionId);
+  if (result.status === 'project_not_found') return notFound(res, '项目不存在');
+  if (result.status === 'invalid') return badRequest(res, result.message);
+  if (result.status === 'version_not_found') {
+    return res.status(404).json({ error: '版本不存在或不属于该项目', unknown_version_ids: [versionId] });
+  }
+  res.json(result.report);
+});
+
+/**
+ * 导出交叉引用校验结果：GET ?version_id=<id>&format=json|csv。
+ * 服务端按相同隔离与 404 语义重新扫描，CSV 带 UTF-8 BOM。
+ */
+app.get('/api/projects/:id/cross-references/export', (req, res) => {
+  const projectId = Number(req.params.id);
+  const versionId = Number(req.query.version_id);
+  if (!Number.isInteger(versionId) || versionId <= 0) {
+    return badRequest(res, 'version_id 必须为正整数');
+  }
+  const result = scanVersionXref(db, projectId, versionId);
+  if (result.status === 'project_not_found') return notFound(res, '项目不存在');
+  if (result.status === 'invalid') return badRequest(res, result.message);
+  if (result.status === 'version_not_found') {
+    return res.status(404).json({ error: '版本不存在或不属于该项目', unknown_version_ids: [versionId] });
+  }
+  const { report } = result;
+  const projectName = (
+    db.prepare('SELECT name FROM projects WHERE id = ?').get(projectId) as { name: string }
+  ).name;
+  const filename = `条款交叉引用校验报告-${projectName}-v${report.version.seq}`;
+  const disposition = `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`;
+  const format = String(req.query.format ?? 'json').toLowerCase();
+  if (format === 'csv') {
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `${disposition}.csv`);
+    return res.send(xrefReportToCsv(report));
   }
   if (format !== 'json') return badRequest(res, 'format 需为 json / csv');
   res.setHeader('Content-Disposition', `${disposition}.json`);
