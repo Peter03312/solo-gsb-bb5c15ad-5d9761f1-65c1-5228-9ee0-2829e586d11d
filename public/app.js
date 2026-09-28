@@ -119,6 +119,7 @@ async function renderProject(id) {
         <h2>${esc(project.name)}</h2>
         <div class="head-side">
           <a class="btn" href="#/projects/${project.id}/terminology">🔎 术语一致性审查</a>
+          <a class="btn" href="#/projects/${project.id}/cross-references">🔗 条款交叉引用校验</a>
           <button class="btn danger" data-action="delete-project" data-id="${project.id}">删除项目</button>
         </div>
       </div>
@@ -856,6 +857,311 @@ function highlightHits(text, hits) {
   return html;
 }
 
+/* ================= 视图：条款交叉引用校验 ================= */
+
+const CROSS_REF_STATUS_LABEL = { unique: '唯一匹配', ambiguous: '歧义', invalid: '失效' };
+const CROSS_REF_STYLE_LABEL = { chinese: '汉字数字', arabic: '阿拉伯数字' };
+
+/**
+ * 条款交叉引用校验模块状态（按项目隔离）：
+ *  - overview：项目内版本清单（进入页面时拉取，只有本项目版本）
+ *  - selectedVersionId：用户选定的单个版本；扫描与定位只使用它
+ *  - result：最近一次扫描结果（含编号索引、段落全文、引用列表）
+ *  - statusFilter：all / unique / ambiguous / invalid
+ *  - located：当前定位的段落锚点（来源 / 目标共用同一份版本正文）
+ */
+const crossRefs = {
+  projectId: null,
+  projectName: '',
+  overview: null,
+  selectedVersionId: null,
+  result: null,
+  scanning: false,
+  error: null,
+  statusFilter: 'all',
+
+  async activate(projectId) {
+    if (this.projectId !== projectId) {
+      this.projectId = projectId;
+      this.overview = null;
+      this.selectedVersionId = null;
+      this.result = null;
+      this.error = null;
+      this.statusFilter = 'all';
+    }
+    await this.fetchOverview();
+  },
+
+  async fetchOverview() {
+    this.overview = await api('GET', `/api/projects/${this.projectId}/cross-references`);
+    this.projectName = this.overview.project.name;
+    if (this.selectedVersionId == null && this.overview.versions.length > 0) {
+      this.selectedVersionId = this.overview.versions[0].id;
+    }
+    if (this.selectedVersionId != null &&
+        !this.overview.versions.some((v) => v.id === this.selectedVersionId)) {
+      this.selectedVersionId = this.overview.versions[0]?.id ?? null;
+      this.result = null;
+    }
+  },
+
+  selectedVersion() {
+    return this.overview?.versions.find((v) => v.id === this.selectedVersionId) ?? null;
+  },
+
+  async selectVersion(versionId) {
+    this.selectedVersionId = Number(versionId);
+    this.result = null;
+    this.error = null;
+    this.statusFilter = 'all';
+    this.draw();
+    await this.runScan();
+  },
+
+  async runScan() {
+    if (this.selectedVersionId == null) return;
+    this.scanning = true;
+    this.error = null;
+    this.draw();
+    try {
+      this.result = await api(
+        'GET',
+        `/api/projects/${this.projectId}/cross-references/scan?version_id=${this.selectedVersionId}`
+      );
+    } catch (err) {
+      this.error = err.message;
+      this.result = null;
+    } finally {
+      this.scanning = false;
+      this.draw();
+    }
+  },
+
+  filteredReferences() {
+    if (!this.result) return [];
+    const refs = this.result.report.references;
+    return this.statusFilter === 'all'
+      ? refs
+      : refs.filter((r) => r.status === this.statusFilter);
+  },
+
+  exportUrl(format) {
+    const params = new URLSearchParams();
+    params.set('version_id', String(this.selectedVersionId));
+    if (this.statusFilter !== 'all') params.set('status', this.statusFilter);
+    params.set('format', format);
+    return `/api/projects/${this.projectId}/cross-references/export?${params.toString()}`;
+  },
+
+  /** 定位：滚动到所选版本正文中的段落（来源段落与唯一目标段落共用同一份正文） */
+  locate(paragraph) {
+    const anchor = document.getElementById(`xref-para-${paragraph}`);
+    if (!anchor) return;
+    anchor.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    anchor.classList.remove('flash');
+    // 强制重排以重放闪烁动画
+    void anchor.offsetWidth;
+    anchor.classList.add('flash');
+    setTimeout(() => anchor.classList.remove('flash'), 1600);
+  },
+
+  draw() {
+    const mount = document.getElementById('crossref-mount');
+    if (mount) mount.innerHTML = this.panelHtml();
+  },
+
+  panelHtml() {
+    const ov = this.overview;
+    if (!ov) return '<div class="crossref-panel"><p class="dim">版本清单加载中…</p></div>';
+    return `
+    <div class="crossref-panel">
+      <div class="res-head">
+        <h3>🔗 条款交叉引用校验 <span class="dim">以段落开头的「第十二条 / 第12条」建编号索引（一至九十九），校验正文中的同类引用</span></h3>
+      </div>
+      ${this.scanFormHtml(ov)}
+      ${this.error ? `<p class="error">${esc(this.error)}</p>` : ''}
+      ${this.result ? this.reportHtml() : ''}
+    </div>`;
+  },
+
+  scanFormHtml(ov) {
+    if (ov.versions.length === 0) {
+      return '<p class="empty">该项目还没有版本，请先在项目页导入版本。</p>';
+    }
+    const options = ov.versions
+      .map((v) =>
+        `<option value="${v.id}" ${this.selectedVersionId === v.id ? 'selected' : ''}>v${v.seq} ${esc(v.label)}（${v.paragraph_count} 段）</option>`)
+      .join('');
+    return `
+    <form id="crossref-form" class="crossref-form">
+      <label>选择版本（扫描与定位仅使用该版本）
+        <select name="version_id">${options}</select>
+      </label>
+      <button class="btn primary" type="submit" ${this.scanning ? 'disabled' : ''}>
+        ${this.scanning ? '扫描中…' : '▶ 扫描交叉引用'}
+      </button>
+    </form>`;
+  },
+
+  reportHtml() {
+    const r = this.result;
+    const s = r.report.summary;
+    const refs = this.filteredReferences();
+    const counts = {
+      unique: r.report.references.filter((x) => x.status === 'unique').length,
+      ambiguous: r.report.references.filter((x) => x.status === 'ambiguous').length,
+      invalid: r.report.references.filter((x) => x.status === 'invalid').length,
+    };
+    return `
+    <div class="crossref-report">
+      <div class="term-report-head">
+        <h4>扫描结果
+          <span class="dim">v${r.version.seq} ${esc(r.version.label)} · 扫描于 ${esc(r.scanned_at)}</span>
+        </h4>
+        <div class="export-bar">
+          导出：
+          <a class="btn small" href="${this.exportUrl('json')}" target="_blank">JSON</a>
+          <a class="btn small" href="${this.exportUrl('csv')}">CSV</a>
+        </div>
+      </div>
+      <div class="stats">
+        <span class="chip">段落 ${s.paragraph_count}</span>
+        <span class="chip">编号 ${s.indexed_numbers}</span>
+        <span class="chip xref-unique">唯一 ${counts.unique}</span>
+        <span class="chip xref-ambiguous${counts.ambiguous > 0 ? ' hot' : ''}">歧义 ${counts.ambiguous}</span>
+        <span class="chip xref-invalid${counts.invalid > 0 ? ' hot' : ''}">失效 ${counts.invalid}</span>
+        <span class="chip">引用合计 ${s.total}</span>
+      </div>
+      <div class="filter-bar">
+        <label>引用状态
+          <select id="crossref-filter-status">
+            <option value="all" ${this.statusFilter === 'all' ? 'selected' : ''}>全部状态</option>
+            <option value="unique" ${this.statusFilter === 'unique' ? 'selected' : ''}>仅唯一匹配</option>
+            <option value="ambiguous" ${this.statusFilter === 'ambiguous' ? 'selected' : ''}>仅歧义</option>
+            <option value="invalid" ${this.statusFilter === 'invalid' ? 'selected' : ''}>仅失效</option>
+          </select>
+        </label>
+        <span class="dim">显示 ${refs.length} / ${r.report.references.length} 处引用</span>
+      </div>
+      ${refs.length === 0
+        ? '<p class="empty">没有符合筛选条件的引用。</p>'
+        : `<table class="cand-table xref-table">
+            <thead><tr><th>来源段落</th><th>引用</th><th>编号</th><th>状态</th><th>目标段落</th><th>上下文</th><th>定位</th></tr></thead>
+            <tbody>
+              ${refs.map((ref) => `
+                <tr class="xref-row st-${ref.status}">
+                  <td class="nowrap">
+                    <button type="button" class="btn small xref-locate" data-action="xref-locate"
+                      data-paragraph="${ref.paragraph_ord}">¶${ref.paragraph_ord}（来源）</button>
+                  </td>
+                  <td><code class="term-snippet">${esc(ref.text)}</code>
+                    <span class="dim">· ${CROSS_REF_STYLE_LABEL[ref.style] ?? ref.style}${ref.self_reference ? ' · 标题自引' : ''}</span></td>
+                  <td>第 ${ref.number} 条</td>
+                  <td><span class="term-chip ${ref.status === 'unique' ? 'allowed' : ref.status === 'ambiguous' ? 'term' : 'forbidden'}">${CROSS_REF_STATUS_LABEL[ref.status]}</span></td>
+                  <td>${this.targetsHtml(ref)}</td>
+                  <td><div class="dim term-context">${esc(ref.context)}</div></td>
+                  <td class="nowrap">
+                    <button type="button" class="btn small" data-action="xref-locate" data-paragraph="${ref.paragraph_ord}">📍 来源</button>
+                    ${ref.status === 'unique'
+                      ? `<button type="button" class="btn small primary" data-action="xref-locate" data-paragraph="${ref.targets[0]}">🎯 目标 ¶${ref.targets[0]}</button>`
+                      : ''}
+                  </td>
+                </tr>`).join('')}
+            </tbody>
+          </table>`}
+      <div class="xref-body">
+        <h4>版本正文（编号索引与定位）</h4>
+        ${this.indexHtml()}
+        ${this.paragraphsHtml()}
+      </div>
+    </div>`;
+  },
+
+  targetsHtml(ref) {
+    if (ref.status === 'invalid') return '<span class="dim">无对应编号段落</span>';
+    if (ref.status === 'ambiguous') {
+      return `<span class="warn">编号对应 ${ref.targets.length} 段：</span>` +
+        ref.targets.map((p) =>
+          `<button type="button" class="btn small" data-action="xref-locate" data-paragraph="${p}">¶${p}</button>`).join(' ');
+    }
+    return `<button type="button" class="btn small primary" data-action="xref-locate" data-paragraph="${ref.targets[0]}">¶${ref.targets[0]}</button>`;
+  },
+
+  indexHtml() {
+    const entries = this.result.report.index;
+    if (entries.length === 0) return '<p class="empty">该版本没有以「第…条」开头的段落，未建立编号索引。</p>';
+    return `
+    <details class="xref-index" open>
+      <summary><b>编号索引（${entries.length} 个编号）</b><span class="dim">同一编号对应多段即为歧义定义，点击段落号可定位</span></summary>
+      <div class="xref-index-grid">
+        ${entries.map((e) => `
+          <div class="xref-index-item ${e.status}">
+            <span class="xref-index-num">第 ${e.number} 条</span>
+            ${e.headings.map((h) =>
+              `<button type="button" class="btn small" data-action="xref-locate" data-paragraph="${h.paragraph_ord}">¶${h.paragraph_ord}</button>`).join('')}
+            ${e.status === 'ambiguous' ? '<span class="term-chip term">歧义</span>' : '<span class="term-chip allowed">唯一</span>'}
+          </div>`).join('')}
+      </div>
+    </details>`;
+  },
+
+  paragraphsHtml() {
+    // 以引用 / 标题的码点区间在段落原文上高亮「第…条」片段
+    const refsByPara = new Map();
+    for (const ref of this.result.report.references) {
+      if (!refsByPara.has(ref.paragraph_ord)) refsByPara.set(ref.paragraph_ord, []);
+      refsByPara.get(ref.paragraph_ord).push(ref);
+    }
+    return `
+    <div class="term-vparas xref-paras">
+      ${this.result.report.paragraphs.map((p) => {
+        const marks = [];
+        if (p.heading) {
+          marks.push({ start: p.heading.start, end: p.heading.end, cls: 'xref-heading', title: '条款标题' });
+        }
+        for (const ref of refsByPara.get(p.ord) ?? []) {
+          const cls = ref.status === 'unique'
+            ? 'allowed'
+            : ref.status === 'ambiguous' ? 'term' : 'forbidden';
+          marks.push({ start: ref.start, end: ref.end, cls, title: CROSS_REF_STATUS_LABEL[ref.status] });
+        }
+        return `
+        <div id="xref-para-${p.ord}" class="term-para${marks.length ? ' has-hit' : ''}">
+          <span class="term-para-ord">¶${p.ord}${p.heading ? ` · ${esc(p.heading.text)}` : ''}</span>
+          <pre class="term-para-text">${highlightIntervals(p.text, marks)}</pre>
+        </div>`;
+      }).join('')}
+    </div>`;
+  },
+};
+
+/**
+ * 在原文上按码点区间高亮任意片段（标题 / 三类引用）。
+ * 区间按调用方给定内容着色，重叠时先落位的区间优先（标题区间在引用扫描时已被排除，天然不重叠）。
+ */
+function highlightIntervals(text, intervals) {
+  const cps = Array.from(text);
+  const marks = new Array(cps.length).fill(null);
+  const ordered = [...intervals].sort((a, b) => a.start - b.start);
+  for (const it of ordered) {
+    for (let i = it.start; i < it.end; i++) {
+      if (marks[i] == null) marks[i] = it;
+    }
+  }
+  let html = '';
+  let cur = null;
+  for (let i = 0; i <= cps.length; i++) {
+    const owner = i < cps.length ? marks[i] : null;
+    if (owner !== cur) {
+      if (cur) html += '</mark>';
+      if (owner) html += `<mark class="term-mark ${owner.cls}" title="${esc(owner.title)}">`;
+      cur = owner;
+    }
+    if (i < cps.length) html += esc(cps[i]);
+  }
+  return html;
+}
+
 /* ================= 视图：比对详情 ================= */
 
 const ASSIGNMENT_LABEL = { unassigned: '未分派', assigned: '已分派', completed: '已完成' };
@@ -1586,6 +1892,10 @@ document.addEventListener('submit', async (e) => {
       const versionId = Number(form.elements.version_id.value);
       const paragraph = Number(form.elements.paragraph.value);
       await lineage.selectStart(versionId, paragraph, { autoLoad: true });
+    } else if (form.id === 'crossref-form') {
+      e.preventDefault();
+      const versionId = Number(form.elements.version_id.value);
+      await crossRefs.selectVersion(versionId);
     } else if (form.classList.contains('ann-form')) {
       e.preventDefault();
       const author = form.elements.author.value.trim();
@@ -1889,6 +2199,8 @@ document.addEventListener('click', async (e) => {
       const box = document.getElementById(`term-vparas-${versionId}`);
       if (box && box.hidden) await termScan.ensureParasLoaded(versionId);
       termScan.toggleParas(versionId);
+    } else if (action === 'xref-locate') {
+      crossRefs.locate(Number(btn.dataset.paragraph));
     } else if (action === 'seal') {
       const input = document.getElementById('seal-by');
       const sealedBy = input.value.trim();
@@ -1989,6 +2301,9 @@ document.addEventListener('change', async (e) => {
     } else if (t.id === 'term-filter-rule') {
       termScan.ruleFilter = t.value;
       termScan.draw();
+    } else if (t.id === 'crossref-filter-status') {
+      crossRefs.statusFilter = t.value;
+      crossRefs.draw();
     } else if (t.id === 'current-reviewer') {
       if (!t.value) {
         currentReviewer.clear(cmp.id);
@@ -2073,13 +2388,42 @@ async function renderTerminology(projectId) {
   termScan.draw();
 }
 
+async function renderCrossRefs(projectId) {
+  try {
+    await crossRefs.activate(projectId);
+  } catch (err) {
+    app.innerHTML = `<section class="panel"><p class="error">${esc(err.message)}</p>
+      <p><a href="#/">返回首页</a></p></section>`;
+    return;
+  }
+  const project = crossRefs.overview.project;
+  app.innerHTML = `
+    <nav class="crumbs">
+      <a href="#/">全部项目</a> / <a href="#/projects/${project.id}">${esc(project.name)}</a> / 条款交叉引用校验
+    </nav>
+    <section class="panel">
+      <div class="panel-head">
+        <h2>🔗 条款交叉引用校验 · ${esc(project.name)}</h2>
+        <a class="btn" href="#/projects/${project.id}">← 返回项目</a>
+      </div>
+      <div id="crossref-mount"></div>
+    </section>`;
+  crossRefs.draw();
+  // 进入页面且有默认版本时自动扫描一次
+  if (crossRefs.selectedVersionId != null && !crossRefs.result && !crossRefs.scanning) {
+    crossRefs.runScan();
+  }
+}
+
 async function route() {
   const hash = location.hash || '#/';
+  const mCrossRefs = hash.match(/^#\/projects\/(\d+)\/cross-references$/);
   const mTerminology = hash.match(/^#\/projects\/(\d+)\/terminology$/);
   const mProject = hash.match(/^#\/projects\/(\d+)$/);
   const mCompare = hash.match(/^#\/comparisons\/(\d+)$/);
   try {
-    if (mTerminology) await renderTerminology(Number(mTerminology[1]));
+    if (mCrossRefs) await renderCrossRefs(Number(mCrossRefs[1]));
+    else if (mTerminology) await renderTerminology(Number(mTerminology[1]));
     else if (mCompare) await renderComparison(Number(mCompare[1]));
     else if (mProject) await renderProject(Number(mProject[1]));
     else await renderProjects();

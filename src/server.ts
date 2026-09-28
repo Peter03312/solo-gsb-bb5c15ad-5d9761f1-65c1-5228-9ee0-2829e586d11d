@@ -39,6 +39,11 @@ import {
   scanVersions,
 } from './termService';
 import { termScanToCsv } from './termExport';
+import {
+  scanVersionCrossRefs,
+  getCrossRefOverview,
+} from './crossRefService';
+import { crossRefsToCsv } from './crossRefExport';
 
 const PORT = Number(process.env.PORT ?? 3000);
 const DB_PATH = process.env.DB_PATH ?? path.join(process.cwd(), 'data', 'review.db');
@@ -712,6 +717,81 @@ app.get('/api/projects/:id/terminology/export', (req, res) => {
   if (format !== 'json') return badRequest(res, 'format 需为 json / csv');
   res.setHeader('Content-Disposition', `${disposition}.json`);
   return res.json(report);
+});
+
+// ---------- 条款交叉引用校验 ----------
+/** 校验页初始化：项目信息 + 项目内版本清单（仅本项目版本，含段落数） */
+app.get('/api/projects/:id/cross-references', (req, res) => {
+  const data = getCrossRefOverview(db, Number(req.params.id));
+  if (!data) return notFound(res, '项目不存在');
+  res.json(data);
+});
+
+const CROSS_REF_STATUS = new Set(['unique', 'ambiguous', 'invalid']);
+
+/**
+ * 对选定版本执行交叉引用扫描：GET ?version_id=<id>&status=unique|ambiguous|invalid。
+ * 扫描只使用该版本；版本未知或属于其他项目 → 404。
+ */
+app.get('/api/projects/:id/cross-references/scan', (req, res) => {
+  const projectId = Number(req.params.id);
+  const versionId = Number(req.query.version_id);
+  if (!Number.isInteger(versionId) || versionId <= 0) {
+    return badRequest(res, 'version_id 必须为正整数');
+  }
+  let statusFilter: 'unique' | 'ambiguous' | 'invalid' | undefined;
+  if (typeof req.query.status === 'string' && req.query.status) {
+    if (!CROSS_REF_STATUS.has(req.query.status)) {
+      return badRequest(res, 'status 需为 unique / ambiguous / invalid');
+    }
+    statusFilter = req.query.status as 'unique' | 'ambiguous' | 'invalid';
+  }
+  const result = scanVersionCrossRefs(db, projectId, versionId, statusFilter);
+  if (result.status === 'project_not_found') return notFound(res, '项目不存在');
+  if (result.status === 'version_not_found') {
+    return notFound(res, '版本不存在或不属于该项目');
+  }
+  if (result.status === 'invalid') return badRequest(res, result.message);
+  res.json(result.result);
+});
+
+/**
+ * 导出交叉引用校验结果：GET ?version_id=<id>&status=<可选>&format=json|csv。
+ * 服务端按相同的项目隔离与 404 语义重新扫描，导出内容与页面筛选一致。
+ */
+app.get('/api/projects/:id/cross-references/export', (req, res) => {
+  const projectId = Number(req.params.id);
+  const versionId = Number(req.query.version_id);
+  if (!Number.isInteger(versionId) || versionId <= 0) {
+    return badRequest(res, 'version_id 必须为正整数');
+  }
+  let statusFilter: 'unique' | 'ambiguous' | 'invalid' | undefined;
+  if (typeof req.query.status === 'string' && req.query.status) {
+    if (!CROSS_REF_STATUS.has(req.query.status)) {
+      return badRequest(res, 'status 需为 unique / ambiguous / invalid');
+    }
+    statusFilter = req.query.status as 'unique' | 'ambiguous' | 'invalid';
+  }
+  const result = scanVersionCrossRefs(db, projectId, versionId, statusFilter);
+  if (result.status === 'project_not_found') return notFound(res, '项目不存在');
+  if (result.status === 'version_not_found') {
+    return notFound(res, '版本不存在或不属于该项目');
+  }
+  if (result.status === 'invalid') return badRequest(res, result.message);
+
+  const { result: data } = result;
+  const filename = `条款交叉引用校验-${data.project.name}-v${data.version.seq}-${data.version.label}`;
+  const disposition = (ext: string) =>
+    `attachment; filename*=UTF-8''${encodeURIComponent(filename)}.${ext}`;
+  const format = String(req.query.format ?? 'json').toLowerCase();
+  if (format === 'csv') {
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', disposition('csv'));
+    return res.send(crossRefsToCsv(data));
+  }
+  if (format !== 'json') return badRequest(res, 'format 需为 json / csv');
+  res.setHeader('Content-Disposition', disposition('json'));
+  return res.json(data);
 });
 
 // ---------- 前端静态资源 ----------

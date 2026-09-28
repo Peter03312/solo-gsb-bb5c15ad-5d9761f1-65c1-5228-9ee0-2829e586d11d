@@ -835,3 +835,29 @@ textarea { width: 100%; resize: vertical; font-family: inherit; }
 .term-mark.forbidden { background: #fecaca; font-weight: 600; }
 
 .head-side { display: flex; gap: 8px; align-items: center; }
+
+/* ---------- 条款交叉引用校验 ---------- */
+.crossref-form { display: flex; gap: 12px; align-items: flex-end; margin: 12px 0; flex-wrap: wrap; }
+.crossref-form label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+.crossref-form select { min-width: 280px; }
+
+.chip.xref-unique { background: var(--resolved-bg); color: var(--resolved-fg); }
+.chip.xref-ambiguous { background: #eff6ff; color: #1d4ed8; border-color: #bfdbfe; }
+.chip.xref-invalid { background: var(--pending-bg); color: var(--pending-fg); }
+
+.xref-table .xref-row.st-invalid { background: #fff5f5; }
+.xref-table .xref-row.st-ambiguous { background: #f5f8ff; }
+.xref-locate { white-space: nowrap; }
+
+.xref-body { margin-top: 16px; }
+.xref-index { margin: 8px 0 14px; border: 1px solid var(--border, #e2e8f0); border-radius: 6px; padding: 8px 12px; }
+.xref-index summary { cursor: pointer; display: flex; gap: 10px; align-items: baseline; }
+.xref-index summary .dim { font-weight: 400; font-size: 12px; }
+.xref-index-grid { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.xref-index-item {
+  display: flex; align-items: center; gap: 6px;
+  border: 1px solid #e2e8f0; border-radius: 6px; padding: 4px 8px; background: #f8fafc;
+}
+.xref-index-item.ambiguous { border-color: #fca5a5; background: #fff7f7; }
+.xref-index-num { font-weight: 700; font-size: 13px; }
+.xref-paras .term-mark.xref-heading { background: #e2e8f0; }
